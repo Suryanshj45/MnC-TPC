@@ -12,6 +12,8 @@ from dotenv import load_dotenv; load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# TODO: when we have multiple companies to same collage the in search of edit/delete first list all then edit/delete them.
+# TODO: delete functionality is not working yet.
 
 class DATABASE(ABC):
     @abstractmethod
@@ -287,40 +289,61 @@ elif option == "Search":
                 st.write("No results found.")
 
 elif option == "Edit/Delete":
-    college_name = st.text_input("Enter College Name to Edit/Delete")
+    college_name = st.text_input("Enter College Name to Edit/Delete", value=st.session_state.get('college_name', ''))
     
     if st.button("Search for Edit/Delete"):
         if college_name:
             results = db.search_by_college(college_name)
             if results:
-                company_name = results[0][0]
-                role = results[0][1]
-                ctc = results[0][2]
-                st.write(f"Company: {company_name}, Role: {role}, CTC: {ctc}")
-                
-                # Input fields for new data
-                new_company_name = st.text_input("New Company Name", value=company_name)
-                new_role = st.text_input("New Role", value=role)
-                new_ctc = st.text_input("New CTC (Decimal Only)", value=str(ctc))
-
-                # Button to update data
-                if st.button("Update Data"):
-                    if new_company_name and new_role and new_ctc:
-                        try:
-                            new_ctc_float = float(new_ctc)
-                            db.update_data(college_name, new_company_name, new_role, new_ctc_float)
-                            st.success("Data updated successfully!")
-                        except ValueError:
-                            st.error("Please enter a valid decimal number for CTC.")
-                    else:
-                        st.warning("Please fill in all fields.")
-
-                # Button to delete data
-                if st.button("Delete Data"):
-                    db.delete_data(college_name)
-                    st.success("Data deleted successfully!")
+                # Store the results in session state
+                st.session_state['company_name'] = results[0][0]
+                st.session_state['role'] = results[0][1]
+                st.session_state['ctc'] = results[0][2]
+                st.success("Search completed! You can now edit or delete.")
             else:
                 st.write("No results found.")
+                st.session_state['company_name'] = ""
+                
+    if st.session_state["company_name"]:  # Check if we have searched for a college
+        # Display current values
+        company_name = st.session_state['company_name']
+        role = st.session_state['role']
+        ctc = st.session_state['ctc']
+        st.write(f"Company: {company_name}, Role: {role}, CTC: {ctc}")
+        
+        # Input fields for new data
+        new_company_name = st.text_input("New Company Name", value=company_name)
+        new_role = st.text_input("New Role", value=role)
+        new_ctc = st.text_input("New CTC (Decimal Only)", value=str(ctc))
+
+        # Button to update data
+        if st.button("Update Data"):
+            if new_company_name and new_role and new_ctc:
+                try:
+                    new_ctc_float = float(new_ctc)
+                    db.update_data(college_name, new_company_name, new_role, new_ctc_float)
+                    st.success("Data updated successfully!")
+                    # clear the session state after successful update
+                    st.session_state['company_name'] = ""
+                    st.session_state['role'] = ""
+                    st.session_state['ctc'] = ""
+                except ValueError:
+                    st.error("Please enter a valid decimal number for CTC.")
+            else:
+                st.warning("Please fill in all fields.")
+
+        # Button to delete data
+        if st.button("Delete Data"):
+            db.delete_data(college_name)
+            st.success("Data deleted successfully!")
+            # Clear session state after deletion if desired
+            st.session_state['company_name'] = ""
+            st.session_state['role'] = ""
+            st.session_state['ctc'] = ""
+    else:
+        st.session_state['company_name'] = ""
+        st.session_state['role'] = ""
+        st.session_state['ctc'] = ""
 
 elif option == "View All Data":
     sort_option = st.selectbox("Sort by:", ("College Name", "Company Name", "Role", "CTC"))
