@@ -1,125 +1,195 @@
 import streamlit as st
-import sqlite3
+import psycopg2
 import pandas as pd
-import io
+import io, os
+import sqlite3
+from urllib.parse import urlparse
+from typing import NewType, Union
+from abc import ABC, abstractmethod
 
-# Connect to SQLite database (it will create one if it doesn't exist)
-conn = sqlite3.connect('college_company.db')
-c = conn.cursor()
+# DEBUG Load environment variables from .env file
+from dotenv import load_dotenv; load_dotenv()
 
-# Create tables if they don't exist
-c.execute('''
-CREATE TABLE IF NOT EXISTS companies (
-    id INTEGER PRIMARY KEY,
-    company_name TEXT,
-    role TEXT,
-    ctc REAL
-)
-''')
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-c.execute('''
-CREATE TABLE IF NOT EXISTS colleges (
-    id INTEGER PRIMARY KEY,
-    college_name TEXT,
-    company_id INTEGER,
-    FOREIGN KEY (company_id) REFERENCES companies (id)
-)
-''')
 
-# Function to add data
-def add_data(college_name, company_name, role, ctc):
-    c.execute('INSERT INTO companies (company_name, role, ctc) VALUES (?, ?, ?)', (company_name, role, ctc))
-    company_id = c.lastrowid
-    c.execute('INSERT INTO colleges (college_name, company_id) VALUES (?, ?)', (college_name, company_id))
-    conn.commit()
-
-# Function to fetch all data
-def fetch_all_data():
-    c.execute('''
-    SELECT colleges.college_name, companies.company_name, companies.role, companies.ctc 
-    FROM colleges 
-    JOIN companies ON colleges.company_id = companies.id
-    ''')
-    return c.fetchall()
-
-def fetch_all_data_sorted(sort_by="college_name"):
-    query = f'''
-    SELECT colleges.college_name, companies.company_name, companies.role, companies.ctc 
-    FROM colleges 
-    JOIN companies ON colleges.company_id = companies.id
-    ORDER BY {sort_by}
-    '''
-    c.execute(query)
-    return c.fetchall()
-
-def search_by_college(college_name):
-    c.execute('''
-    SELECT companies.company_name, companies.role, companies.ctc 
-    FROM companies 
-    JOIN colleges ON companies.id = colleges.company_id 
-    WHERE LOWER(colleges.college_name) = LOWER(?)
-    ''', (college_name,))
-    return c.fetchall()
-
-def search_by_company(company_name):
-    c.execute('''
-    SELECT colleges.college_name, companies.role, companies.ctc 
-    FROM colleges 
-    JOIN companies ON colleges.company_id = companies.id 
-    WHERE LOWER(companies.company_name) = LOWER(?)
-    ''', (company_name,))
-    return c.fetchall()
-
-def search_by_role(role):
-    c.execute('''
-    SELECT colleges.college_name, companies.company_name, companies.ctc 
-    FROM colleges 
-    JOIN companies ON colleges.company_id = companies.id 
-    WHERE LOWER(companies.role) = LOWER(?)
-    ''', (role,))
-    return c.fetchall()
-
-def search_with_filters(college_name=None, company_name=None, role=None):
-    query = '''
-    SELECT colleges.college_name, companies.company_name, companies.role, companies.ctc 
-    FROM colleges 
-    JOIN companies ON colleges.company_id = companies.id
-    WHERE 1=1
-    '''
-    params = []
+class DATABASE(ABC):
+    @abstractmethod
+    def commit(self): ...
+    @abstractmethod
+    def close(self): ...
+    @abstractmethod
+    def create_tables(self): ...
+    @abstractmethod
+    def add_data(self, college_name, company_name, role, ctc): ...
+    @abstractmethod
+    def fetch_all_data(self): ...
+    @abstractmethod
+    def fetch_all_data_sorted(self, sort_by="college_name"): ...
+    @abstractmethod
+    def search_by_college(self, college_name): ...
+    @abstractmethod
+    def search_by_company(self, company_name): ...
+    @abstractmethod
+    def search_by_role(self, role): ...
+    @abstractmethod
+    def search_with_filters(self, college_name=None, company_name=None, role=None): ... 
+    @abstractmethod
+    def update_data(self, college_name, new_company_name, new_role, new_ctc): ...
+    @abstractmethod
+    def delete_data(self, college_name): ...
+        
+class PostgreSQL(DATABASE):
+    def __init__(self, db_url):
+        parsed_url = urlparse(db_url)
+        
+        # Connect to PostgreSQL database
+        self.conn:psycopg2.connection = psycopg2.connect(
+            dbname=parsed_url.path[1:],  # Remove the leading '/' 
+            user=parsed_url.username,
+            password=parsed_url.password, 
+            host=parsed_url.hostname, 
+            port=parsed_url.port
+        )
+        
+        self.create_tables()
     
-    if college_name:
-        query += " AND LOWER(colleges.college_name) = LOWER(?)"
-        params.append(college_name)
+    def commit(self): return self.conn.commit()
+    def close(self): return self.conn.close()
     
-    if company_name:
-        query += " AND LOWER(companies.company_name) = LOWER(?)"
-        params.append(company_name)
-    
-    if role:
-        query += " AND LOWER(companies.role) = LOWER(?)"
-        params.append(role)
-    
-    c.execute(query, tuple(params))
-    return c.fetchall()
+    # Create tables if they don't exist
+    def create_tables(self):
+        with self.conn.cursor() as c:
+            c.execute('''
+            CREATE TABLE IF NOT EXISTS companies (
+                id SERIAL PRIMARY KEY,
+                company_name TEXT,
+                role TEXT,
+                ctc REAL
+            )
+            ''')
 
-def update_data(college_name, new_company_name, new_role, new_ctc):
-    c.execute('''
-    UPDATE companies
-    SET company_name = ?, role = ?, ctc = ?
-    WHERE id IN (SELECT company_id FROM colleges WHERE college_name = ?)
-    ''', (new_company_name, new_role, new_ctc, college_name))
-    conn.commit()
+            c.execute('''
+            CREATE TABLE IF NOT EXISTS colleges (
+                id SERIAL PRIMARY KEY,
+                college_name TEXT,
+                company_id INTEGER,
+                FOREIGN KEY (company_id) REFERENCES companies (id)
+            )
+            ''')
+        self.commit()
 
-def delete_data(college_name):
-    c.execute('''
-    DELETE FROM companies
-    WHERE id IN (SELECT company_id FROM colleges WHERE college_name = ?)
-    ''', (college_name,))
-    c.execute('''
-    DELETE FROM colleges WHERE college_name = ?
-    ''', (college_name,))
-    conn.commit()
+    # Function to add data
+    def add_data(self, college_name, company_name, role, ctc):
+        with self.conn.cursor() as c:
+            c.execute('INSERT INTO companies (company_name, role, ctc) VALUES (%s, %s, %s) RETURNING id', (company_name, role, ctc))
+            company_id = c.fetchone()[0]
+            c.execute('INSERT INTO colleges (college_name, company_id) VALUES (%s, %s)', (college_name, company_id))
+        self.commit()
+
+    # Function to fetch all data
+    def fetch_all_data(self):
+        with self.conn.cursor() as c:
+            c.execute('''
+            SELECT colleges.college_name, companies.company_name, companies.role, companies.ctc 
+            FROM colleges 
+            JOIN companies ON colleges.company_id = companies.id
+            ''')
+            return c.fetchall()
+    def fetch_all_data_sorted(self, sort_by="college_name"):
+        with self.conn.cursor() as c:
+            query = f'''
+            SELECT colleges.college_name, companies.company_name, companies.role, companies.ctc 
+            FROM colleges 
+            JOIN companies ON colleges.company_id = companies.id
+            ORDER BY {sort_by}
+            '''
+            c.execute(query)
+            return c.fetchall()
+    def search_by_college(self, college_name):
+        with self.conn.cursor() as c:
+            c.execute('''
+            SELECT companies.company_name, companies.role, companies.ctc 
+            FROM companies 
+            JOIN colleges ON companies.id = colleges.company_id 
+            WHERE LOWER(colleges.college_name) = LOWER(%s)
+            ''', (college_name,))
+            return c.fetchall()
+
+    def search_by_company(self, company_name):
+        with self.conn.cursor() as c:
+            c.execute('''
+            SELECT colleges.college_name, companies.role, companies.ctc 
+            FROM colleges 
+            JOIN companies ON colleges.company_id = companies.id 
+            WHERE LOWER(companies.company_name) = LOWER(%s)
+            ''', (company_name,))
+            return c.fetchall()
+    def search_by_role(self, role):
+        with self.conn.cursor() as c:
+            c.execute('''
+            SELECT colleges.college_name, companies.company_name, companies.ctc 
+            FROM colleges 
+            JOIN companies ON colleges.company_id = companies.id 
+            WHERE LOWER(companies.role) = LOWER(%s)
+            ''', (role,))
+            return c.fetchall()
+
+    def search_with_filters(self, college_name=None, company_name=None, role=None):
+        query = '''
+        SELECT colleges.college_name, companies.company_name, companies.role, companies.ctc 
+        FROM colleges 
+        JOIN companies ON colleges.company_id = companies.id
+        WHERE 1=1
+        '''
+        params = []
+
+        if college_name:
+            query += " AND LOWER(colleges.college_name) = LOWER(%s)"
+            params.append(college_name)
+
+        if company_name:
+            query += " AND LOWER(companies.company_name) = LOWER(%s)"
+            params.append(company_name)
+
+        if role:
+            query += " AND LOWER(companies.role) = LOWER(%s)"
+            params.append(role)
+
+        with self.conn.cursor() as c:
+            c.execute(query, params)
+            return c.fetchall()
+
+    def update_data(self, college_name, new_company_name, new_role, new_ctc):
+        with self.conn.cursor() as c:
+            c.execute('''
+            UPDATE companies
+            SET company_name = %s, role = %s, ctc = %s
+            WHERE id IN (SELECT company_id FROM colleges WHERE college_name = %s)
+            ''', (new_company_name, new_role, new_ctc, college_name))
+        self.commit()
+
+    def delete_data(self, college_name):
+        with self.conn.cursor() as c:
+            c.execute('''
+            DELETE FROM companies
+            WHERE id IN (SELECT company_id FROM colleges WHERE college_name = %s)
+            ''', (college_name,))
+            c.execute('''
+            DELETE FROM colleges WHERE college_name = %s
+            ''', (college_name,))
+        self.commit()
+
+# NOTE: In a typical Streamlit application, the entire script is rerun on every interaction, such as when a user inputs data or clicks a button.
+# Function to connect to the database
+def get_db_connection():
+    if 'db' not in st.session_state:
+        st.session_state.db = PostgreSQL(db_url=DATABASE_URL) 
+        st.write("Connected to database.")
+    return st.session_state.db
+
+# Initialize the database connection
+db = get_db_connection() # Fn Once
 
 # Initialize session state for form fields if not already present
 if 'college_name' not in st.session_state:
@@ -148,7 +218,7 @@ if option == "Add":
         if st.session_state.college_name and st.session_state.company_name and st.session_state.role and st.session_state.ctc:
             try:
                 ctc_float = float(st.session_state.ctc)  # Convert CTC to float
-                add_data(st.session_state.college_name, st.session_state.company_name, st.session_state.role, ctc_float)
+                db.add_data(st.session_state.college_name, st.session_state.company_name, st.session_state.role, ctc_float)
                 st.success("Data added successfully!")
                 
                 # Clear the input fields for new entry
@@ -168,7 +238,7 @@ elif option == "Search":
         college_name = st.text_input("Enter College Name to Search")
         if st.button("Search"):
             if college_name:
-                results = search_by_college(college_name)
+                results = db.search_by_college(college_name)
                 if results:
                     df = pd.DataFrame(results, columns=["Company Name", "Role", "CTC"])
                     st.dataframe(df)  # Display the results in a table format
@@ -181,7 +251,7 @@ elif option == "Search":
         company_name = st.text_input("Enter Company Name to Search")
         if st.button("Search"):
             if company_name:
-                results = search_by_company(company_name)
+                results = db.search_by_company(company_name)
                 if results:
                     df = pd.DataFrame(results, columns=["College Name", "Role", "CTC"])
                     st.dataframe(df)  # Display the results in a table format
@@ -194,7 +264,7 @@ elif option == "Search":
         role = st.text_input("Enter Role to Search")
         if st.button("Search"):
             if role:
-                results = search_by_role(role)
+                results = db.search_by_role(role)
                 if results:
                     df = pd.DataFrame(results, columns=["College Name", "Company Name", "CTC"])
                     st.dataframe(df)  # Display the results in a table format
@@ -209,7 +279,7 @@ elif option == "Search":
         role = st.text_input("Enter Role (optional)")
         
         if st.button("Search with Filters"):
-            results = search_with_filters(college_name, company_name, role)
+            results = db.search_with_filters(college_name, company_name, role)
             if results:
                 df = pd.DataFrame(results, columns=["College Name", "Company Name", "Role", "CTC"])
                 st.dataframe(df)
@@ -221,7 +291,7 @@ elif option == "Edit/Delete":
     
     if st.button("Search for Edit/Delete"):
         if college_name:
-            results = search_by_college(college_name)
+            results = db.search_by_college(college_name)
             if results:
                 company_name = results[0][0]
                 role = results[0][1]
@@ -238,7 +308,7 @@ elif option == "Edit/Delete":
                     if new_company_name and new_role and new_ctc:
                         try:
                             new_ctc_float = float(new_ctc)
-                            update_data(college_name, new_company_name, new_role, new_ctc_float)
+                            db.update_data(college_name, new_company_name, new_role, new_ctc_float)
                             st.success("Data updated successfully!")
                         except ValueError:
                             st.error("Please enter a valid decimal number for CTC.")
@@ -247,16 +317,17 @@ elif option == "Edit/Delete":
 
                 # Button to delete data
                 if st.button("Delete Data"):
-                    delete_data(college_name)
+                    db.delete_data(college_name)
                     st.success("Data deleted successfully!")
             else:
                 st.write("No results found.")
 
 elif option == "View All Data":
     sort_option = st.selectbox("Sort by:", ("College Name", "Company Name", "Role", "CTC"))
-    results = fetch_all_data_sorted(sort_by=sort_option.lower().replace(" ", "_"))
+    results = db.fetch_all_data_sorted(sort_by=sort_option.lower().replace(" ", "_"))
     df = pd.DataFrame(results, columns=["College Name", "Company Name", "Role", "CTC"])
     
     st.dataframe(df)
 
-conn.close()
+# db.close()
+# NOTE: In a typical Streamlit application, the entire script is rerun on every interaction, such as when a user inputs data or clicks a button.
